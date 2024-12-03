@@ -1,32 +1,7 @@
 library(DBI)
 library(RMariaDB)
 library(dplyr)
-library(lubridate)
 library(rvest)
-library(xml2)
-
-# Først sæt miljøvariablen
-# readRenviron(".Renviron")
-
-# Derefter brug den i forbindelsen
-bil_con <- dbConnect(MariaDB(),
-                     dbname = "Bilbasen_audi",
-                     host = "localhost",
-                     port = 3306,
-                     user = "root",
-                     password = "Jernæblevej16tv!"
-)
-
-dbWriteTable(bil_con,"merged_df",merged_df_final)
-dbWriteTable(bil_con,"sim_df",sim_df)
-dbWriteTable(bil_con,"first_scrape",adf)
-dbWriteTable(bil_con,"nyebiler",tysk)
-
-saveRDS(merged_df_final,"merged_df_final.rds")
-saveRDS(sim_df,"sim_df.rds")
-saveRDS(adf,"all_cars.rds")
-saveRDS(nyebiler,"car_database.rds")
-
 
 
 
