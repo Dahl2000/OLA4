@@ -1,195 +1,335 @@
-library(dkstat)
-library(danstat)
-library(devtools)
-library(gt)
-library(tidyverse)
-###########################################
-# OPG. 3.1
+library(stringr)
+library(readr)
+library(ggplot2)
+library(dplyr)
+library(httr)
 
-# indlæs data via API
-# Hent dataen
-NKHCO21 <- dst_meta(table = "NKHCO21", lang = "da")
 
-# Filtrer data
-realforbrug.filter <- list( 
-  FORMAAAL = "I alt",
-  PRISENHED = "2020-priser, kædede værdier",
-  SÆSON = "Sæsonkorrigeret",
-  Tid = "*"
+contents <- untar("log (1).tar", list = TRUE)
+dflog <- data.frame(text = unlist(lapply(contents, read_lines)))
+
+
+# Opret en dataframe fra log entries
+dflog <- data.frame(log_entry = dflog, stringsAsFactors = FALSE)
+
+# Opret en tom dataframe til at gemme resultaterne
+log_df <- data.frame(
+  IP_Address = character(),
+  User_Identifier = character(),
+  Auth_User = character(),
+  Timestamp = character(),
+  Request_Method = character(),
+  Request_Resource = character(),
+  Protocol = character(),
+  Status_Code = integer(),
+  Size = numeric(),
+  Referrer = character(),
+  User_Agent = character(),
+  stringsAsFactors = FALSE
 )
 
-NKHC021_data <- dst_get_data(table = "NKHC021", query = realforbrug.filter, lang = "da")
+# Loop gennem hver række i dflog
+for (i in 1:nrow(dflog)) {
+  entry <- dflog$text[i]
+  new_row <- data.frame(
+    IP_Address = str_extract(entry, "^[^ ]+"),
+    User_Identifier = str_extract(entry, "-"),
+    Auth_User = str_extract(entry, "-"),
+    Timestamp =  str_extract(entry, "\\[(.*?)\\]") %>% str_remove_all("[\\[\\]]"),
+    Request_Method = str_extract(entry, "\"(\\w+)"),
+    Request_Resource = str_extract(entry, "\"[A-Z]+ (.*?) HTTP"),
+    Protocol = str_extract(entry, "HTTP/\\d\\.\\d"),
+    Status_Code = as.integer(str_extract(entry, "\\s(\\d{3})\\s")),
+    Size = as.numeric(str_extract(entry, "\\s\\d+\\s$")),
+    Referrer = str_extract(entry, "\"-\""),
+    User_Agent = str_extract(entry, "\".*\"$") %>% str_remove_all("\""),
+    stringsAsFactors = FALSE
+    )
+  log_df <- rbind(log_df, new_row)
+}
 
-# Sørg for, at TID-kolonnen er i kvartalsformat
-NKHC021_data$TID <- paste0(format(as.Date(NKHC021_data$TID), "%Y"), quarters(as.Date(NKHC021_data$TID)))
+log_df_clean <- cbind(log_df[, 1:3], 
+                as.Date(log_df$Timestamp, format = "%d/%b/%Y"),  # Ny kolonne 4
+                log_df[, 4:ncol(log_df)])  # Behold de resterende kolonner
+log_df_clean$`as.Date(log_df$Timestamp, format = "%d/%b/%Y")` <- as.Date(log_df_clean$`as.Date(log_df$Timestamp, format = "%d/%b/%Y")`)
 
-# Beregning af realvækst
-NKHC021_data$Realvækst <- (NKHC021_data$value / dplyr::lag(NKHC021_data$value, 4) - 1) * 100  # Beregn realvækst år-over-år
+# Omdøb kolonne
+colnames(log_df_clean)[4] <- "Date"
 
-# subset fra 1998Q1 - Find rækken, hvor TID er "1998Q1"
-start_row <- which(NKHC021_data$TID == "1998Q1")
+# fjern " fra Request_method
+log_df_clean$Request_Method <- gsub('"', '', log_df_clean$Request_Method)
 
-# Subset fra "1998Q1" til slutningen
-realforbrug_data_filtreret <- NKHC021_data[start_row:nrow(NKHC021_data), ]
+# hurtig oversigt over date
+table(log_df_clean$Date)
 
-######
-# Dummy variabel
-realforbrug_data_filtreret$`op/ned` <- ifelse(realforbrug_data_filtreret$Realvækst > 0, "Op", 
-                                              ifelse(realforbrug_data_filtreret$Realvækst < 0, "Ned", "Neutral"))
+###################
+# TOP 10 IP ADRESSER
+# Tæl antallet af forekomster af hver IP-adresse
+ip_counts <- table(log_df_clean$IP_Address)
+unique_ip_count <- length(unique(log_df_clean$IP_Address)) # 1630 unikke ip adresser
 
-realforbrug_data_filtreret$dummy <- ifelse(realforbrug_data_filtreret$`op/ned` == "Op", 1,0)
+# Omdan til dataframe for lettere håndtering
+ip_counts_df <- as.data.frame(ip_counts)
 
-table(realforbrug_data_filtreret$`op/ned`)
+# Sortér efter antallet i faldende rækkefølge
+sorted_ips <- ip_counts_df[order(-ip_counts_df$Freq), ]
 
-############################
-# OPG. 3.2
-################
+# Vælg de 10 mest forekommende IP-adresser
+top_ips <- head(sorted_ips, 10)
 
-# Hent metadata via API
-meta_data <- dst_meta("FORV1")
-str(meta_data)
-
-# Hent dataen
-FORV1 <- dst_meta(table = "FORV1", lang = "da")
-
-# Filtrer data
-FORV1_filter <- list(
-  INDIKATOR = "*",  # Brug "*" for at inkludere alle indikatorer
-  Tid = "*"         # Brug "*" for at inkludere alle tidspunkter
-)
-FORV1Data <- dst_get_data(table = "FORV1", query = FORV1_filter, lang = "da")
-
-# Konverter data til bred format
-FORV1Data_wide <- FORV1Data %>%
-  pivot_wider(names_from = INDIKATOR, values_from = value)
-
-# Sørg for, at TID-kolonnen er i kvartalsformat
-FORV1Data_wide$TID <- paste0(format(as.Date(FORV1Data_wide$TID), "%Y"), quarters(as.Date(FORV1Data_wide$TID)))
-
-# Summér alle kolonner gruppevis baseret på samme kvartal
-FORV1Data_wide <- aggregate(. ~ TID, data = FORV1Data_wide, FUN = mean, na.rm = TRUE)
-
-# subset fra 1998Q1 - Find rækken, hvor TID er "1998Q1"
-start_row <- which(FORV1Data_wide$TID == "1998Q1")
-
-# Subset fra "1998Q1" til slutningen
-FORV1Data_wide <- FORV1Data_wide[start_row:nrow(FORV1Data_wide), ]
-
-# Opret et nyt dataframe med DI-FTI relaterede kolonner
-
-new_row <- realforbrug_data_filtreret[108,]
-realforbrug_data_filtreret[108,] <- new_row
-
-realforbrug_data_filtreret <- cbind(realforbrug_data_filtreret,
-                                    FORV1Data_wide$`Familiens økonomiske situation i dag, sammenlignet med for et år siden`,
-                                    FORV1Data_wide$`Danmarks økonomiske situation i dag, sammenlignet med for et år siden`,
-                                    FORV1Data_wide$`Anskaffelse af større forbrugsgoder, fordelagtigt for øjeblikket`,
-                                    FORV1Data_wide$`Anskaffelse af større forbrugsgoder, inden for de næste 12 mdr.`)
-
-realforbrug_data_filtreret$`op/ned` <- as.factor(realforbrug_data_filtreret$`op/ned`)
-rownames(realforbrug_data_filtreret) <- NULL
-
-realforbrug_data_filtreret$DI_indikator <- rowMeans(realforbrug_data_filtreret[, c(9:12)])
-
-# Udfør logistisk regression med præcise variabelnavne
-logit_model <- glm(`op/ned` ~ DI_indikator,
-                   data = realforbrug_data_filtreret, 
-                   family = binomial)
-
-summary(logit_model)
-
-prediction <- data.frame(predict(logit_model,type = "response"))
-
-realforbrug_data_filtreret$`op/ned` <- relevel(realforbrug_data_filtreret$`op/ned`, ref = "Ned")
-contrasts(realforbrug_data_filtreret$`op/ned`)
-
-# predictdata
-f_pred <- data.frame(DI_indikator=-10.2750000)
-predict(logit_model, f_pred, type = "response") # 0.6427198 
-
-prediction$prd_direction <- ifelse(prediction$predict.logit_model..type....response..>= 0.6427198, 1,0)
-
-###########################
-# OPG. 3.3
-########################
-confusion_matrix <- data.frame(
-  prd_direction = prediction$prd_direction,
-  op_ned = realforbrug_data_filtreret$dummy[1:107]
-)
-
-confusion_matrix$prd_direction <- factor(confusion_matrix$prd_direction, levels = c(0, 1))
-confusion_matrix$op_ned <- factor(confusion_matrix$op_ned, levels = c(0, 1))
-confusion_di <- confusionMatrix(data = confusion_matrix$prd_direction, reference = confusion_matrix$op_ned)
-confusion_di
-table(confusion_matrix$prd_direction)
-table(confusion_matrix$op_ned)
-
-roc_curve <- roc(realforbrug_data_filtreret$dummy[1:107], prediction$predict.logit_model..type....response..)
-
-# Plot ROC-kurven
-roc_curve$sensitivities
-roc_curve$specificities
-
-fpr <- 1 - roc_curve$specificities
-tpr <- roc_curve$sensitivities
-
-# Plot TPR (y) mod FPR (x) manuelt
-plot(fpr, tpr, type = "l", col = "blue", lwd = 2,
-     xlab = "False Positive Rate", ylab = "True Positive Rate",
-     xlim = c(0, 1), ylim = c(0, 1), main = "ROC Curve")
-
-# Tilføj diagonal linje for tilfældig klassifikation (reference)
-abline(a = 0, b = 1, col = "gray", lty = 2)
-# Tilføj AUC-værdi på plottet
-legend("bottomright", legend = paste("AUC =", round(roc_curve$auc, 3)), col = "blue", lwd = 2)
+#Plot med top 10 mest forekommede IP-adresser
+ggplot(top_ips, aes(x = reorder(Var1, Freq), y = Freq)) +
+  geom_bar(stat = "identity", fill = "steelblue") + 
+  geom_text(aes(label = Freq), 
+            hjust = 0.5,              # Centreret horisontalt
+            vjust = -0.5,             # Placeret lige over søjlen
+            size = 3.5,
+            color = "black") + 
+  labs(#title = "Én IP adresse udgår næsten 27% af antallet af IP adresser",
+       x = "Top 10 IP adresser",
+       y = "Antal") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
 #######################
-# OPG. 3.4
-#####################
+# WHO IS INFO
+# geo locate
+{
+library(httr)
+library(jsonlite)
 
-# Scenarie 1: Tilføj interaktion mellem Familiens økonomiske situation og Danmarks økonomiske situation
-logit_model_interaction <- glm(`op/ned` ~ 
-                                 realforbrug_data_filtreret$`FORV1Data_wide$\`Familiens økonomiske situation i dag, sammenlignet med for et år siden\`` * realforbrug_data_filtreret$`FORV1Data_wide$\`Danmarks økonomiske situation i dag, sammenlignet med for et år siden\`` +
-                                 realforbrug_data_filtreret$`FORV1Data_wide$\`Anskaffelse af større forbrugsgoder, fordelagtigt for øjeblikket\`` +
-                                 realforbrug_data_filtreret$`FORV1Data_wide$\`Anskaffelse af større forbrugsgoder, inden for de næste 12 mdr.\``,
-                               data = realforbrug_data_filtreret, 
-                               family = binomial)
+# Funktion til at hente geolokalisering af en IP-adresse
+get_ip_data <- function(ip) {
+  url <- paste0("http://ip-api.com/json/", ip)
+  response <- GET(url)
+  ip_data <- fromJSON(content(response, "text"))
+  return(ip_data)
+}
 
-summary(logit_model_interaction)
+# Liste af IP-adresser
+ip_addresses <- c("192.0.102.40", "46.101.144.32", "5.179.80.205")
 
-# Forudsigelse og konfusion matrix for interaktionsmodellen
-glm.probs_interaction <- predict(logit_model_interaction, type = "response")
-glm.pred_interaction <- ifelse(glm.probs_interaction > 0.50, "OP", "NED")
-confusion_matrix_interaction <- table(glm.pred_interaction, realforbrug_data_filtreret$Realvækst[1:107])
+# Hent geolokalisering for hver IP
+ip_data_list <- lapply(ip_addresses, get_ip_data)
 
-# Beregn nøjagtighed for interaktionsmodellen
-accuracy_interaction <- mean(glm.pred_interaction == realforbrug_data_filtreret$Realvækst[1:107]) * 100
-print(paste("Nøjagtighed for interaktionsmodellen:", round(accuracy_interaction, 2), "%"))
+# Ekstraher lat og lon fra IP-dataene
+ip_df <- data.frame(
+  IP = ip_addresses,
+  Lat = sapply(ip_data_list, function(x) x$lat),
+  Lon = sapply(ip_data_list, function(x) x$lon),
+  City = sapply(ip_data_list, function(x) x$city)
+)
+
+library(ggplot2)
+library(maps)
+
+# Opret et kort med ggplot2
+world_map <- map_data("world")
+
+# Plot kortet med punkt for IP-adressen
+ggplot(data = world_map) +  # Grundlæggende ggplot objekt for kortet
+  borders("world", colour = "gray85", fill = "gray90") +  # Tilføj grænser for verden
+  geom_point(data = ip_df, aes(x = Lon, y = Lat), color = "red", size = 3) +  # Tilføj punkter for IP-adresser
+  geom_text(data = ip_df, aes(x = Lon, y = Lat, label = City), color = "black", size = 4, vjust = -1, hjust = 1) +  # Tilføj bynavnene som tekst
+  labs(#title = "IP-adresser på kortet",
+       x = "Longitude", y = "Latitude")+
+  theme_minimal()
+}
+
+####################
+# TOP 10 DATE
+
+date_counts <- table(log_df_clean$Date)
+
+# Omdan til dataframe for lettere håndtering
+date_counts_df <- as.data.frame(date_counts)
+
+# Sortér efter antallet i faldende rækkefølge
+sorted_dates <- date_counts_df[order(-date_counts_df$Freq), ]
+
+# Vælg de 10 mest forekommende Dates
+top_dates <- head(sorted_dates, 10)
+
+ggplot(top_dates, aes(x = reorder(Var1, Freq), y = Freq)) +
+  geom_bar(stat = "identity", fill = "steelblue") + 
+  geom_text(aes(label = Freq), 
+            hjust = 0.5,              # Centreret horisontalt
+            vjust = -0.5,             # Placeret lige over søjlen
+            size = 3.5,
+            color = "black") +  
+  labs(#title = "Over 14% af forekomsterne kom fra én dag",
+       x = "Dato",
+       y = "Antal") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+####################
+# Hvilken IP fremgår mest den ene dag
+filtered_date <- subset(log_df_clean, Date == "2023-10-31") # 2163 forekomster
+
+date_counts_ip <- table(filtered_date$IP_Address)
+
+# Omdan til dataframe for lettere håndtering
+date_ip_df <- as.data.frame(date_counts_ip)
+
+# Sortér efter antallet i faldende rækkefølge
+sorted_dates_ip <- date_ip_df[order(-date_ip_df$Freq), ]
+
+# Vælg de 10 mest forekommende Dates
+top_dates_ip <- head(sorted_dates_ip, 3)
+
+ggplot(top_dates_ip, aes(x = reorder(Var1, Freq), y = Freq)) +
+  geom_bar(stat = "identity", fill = "steelblue") + 
+  geom_text(aes(label = Freq), 
+            hjust = 0.5,              # Centreret horisontalt
+            vjust = -0.5,             # Placeret lige over søjlen
+            size = 3.5,
+            color = "black") +  
+  labs(#title = "Den 2023-10-31 stod én IP adresse for 53% af forekomsterne",
+       x = "IP adresser",
+       y = "Antal") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+##############
+# hvilken status kode fik ip adressen
+
+filtered_date_status <- subset(filtered_date, IP_Address == "5.179.80.205")
+
+date_status_counts <- table(filtered_date_status$Status_Code)
+
+# Omdan til dataframe for lettere håndtering
+date_status_counts_df <- as.data.frame(date_status_counts)
+
+# Sortér efter antallet i faldende rækkefølge
+sorted_date_status <- date_status_counts_df[order(-date_status_counts_df$Freq), ]
+
+# Vælg de 10 mest forekommende status Dates
+top_date_status <- head(sorted_date_status, 3)
+
+ggplot(top_date_status, aes(x = reorder(Var1, Freq), y = Freq)) +
+  geom_bar(stat = "identity", fill = "steelblue") + 
+  geom_text(aes(label = Freq), 
+            hjust = 0.5,
+            vjust = -0.5,
+            size = 3.5,
+            color = "black") +  
+  labs(#title = "",
+    x = "Status code",
+    y = "Antal") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+oktober_31 <- data.frame(table(filtered_date_status$Request_Method))
+
+######################################
+# se overblik over status koder
+
+status_counts <- data.frame(table(log_df_clean$Status_Code))
+
+# Omdan til dataframe for lettere håndtering
+status_counts_df <- as.data.frame(status_counts)
+
+# Sortér efter antallet i faldende rækkefølge
+sorted_status <- status_counts_df[order(-status_counts_df$Freq), ]
+
+# Vælg de 10 mest forekommende Dates
+top_status <- head(sorted_status, 3)
+
+ggplot(top_status, aes(x = reorder(Var1, Freq), y = Freq)) +
+  geom_bar(stat = "identity", fill = "steelblue") + 
+  geom_text(aes(label = Freq), 
+            hjust = 0.5,              # Centreret horisontalt
+            vjust = -0.5,             # Placeret lige over søjlen
+            size = 3.5,
+            color = "black") +  
+  labs(#title = "82% lykkeds med deres HTTP-anmodning",
+       x = "Status code",
+       y = "Antal") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Find 404
+########################
+kode404 <- log_df_clean %>% 
+  filter(Status_Code=="404") %>% 
+  nrow()
+
+# Opret subset med rækker, hvor Status_Code er 404
+Code404sub <- subset(log_df_clean, Status_Code == 404)
+
+######################
+filtered_404 <- subset(log_df_clean, Status_Code == 404) # 2163 forekomster
+
+counts404 <- table(filtered_404$IP_Address)
+
+counts404_df <- as.data.frame(counts404)
 
 
-# Scenarie 2: Tilføjelse af kvadratiske termer
-logit_model_quadratic <- glm(realforbrug_data_filtreret$`op/ned` ~ 
-                               poly(realforbrug_data_filtreret$`FORV1Data_wide$\`Familiens økonomiske situation i dag, sammenlignet med for et år siden\``, 2) + 
-                               poly(realforbrug_data_filtreret$`FORV1Data_wide$\`Danmarks økonomiske situation i dag, sammenlignet med for et år siden\``, 2) +
-                               realforbrug_data_filtreret$`FORV1Data_wide$\`Anskaffelse af større forbrugsgoder, fordelagtigt for øjeblikket\`` +
-                               realforbrug_data_filtreret$`FORV1Data_wide$\`Anskaffelse af større forbrugsgoder, inden for de næste 12 mdr.\``,
-                             data = realforbrug_data_filtreret, 
-                             family = binomial)
+sorted_404 <- counts404_df[order(-counts404_df$Freq), ]
 
-# Se resultaterne af den nye model
-summary(logit_model_quadratic)
+# Vælg de 10 mest forekommende IP adresser med 404 status kode
+top_404 <- head(sorted_404, 10)
 
-# Forudsigelse og konfusion matrix for kvadratmodellen
-glm.probs_quadratic <- predict(logit_model_quadratic, type = "response")
-glm.pred_quadratic <- ifelse(glm.probs_quadratic > 0.50, "OP", "NED")
+ggplot(top_404, aes(x = reorder(Var1, Freq), y = Freq)) +
+  geom_bar(stat = "identity", fill = "steelblue") + 
+  geom_text(aes(label = Freq), 
+            hjust = 0.5,              # Centreret horisontalt
+            vjust = -0.5,             # Placeret lige over søjlen
+            size = 3.5,
+            color = "black") +  
+  labs(#title = "Én IP adresse stod for over 16% af 404 status koderne",
+       x = "IP adresser",
+       y = "Antal") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
-# Opret en konfusion matrix
-confusion_matrix_quadratic <- table(glm.pred_quadratic, realforbrug_data_filtreret$Realvækst[1:107])
+#################################
+# se request method
+method_counts <- table(log_df_clean$Request_Method)
 
-# Beregn nøjagtighed for kvadratmodellen
-accuracy_quadratic <- mean(glm.pred_quadratic == realforbrug_data_filtreret$Realvækst[1:107]) * 100
-print(paste("Nøjagtighed for kvadratmodellen:", round(accuracy_quadratic, 2), "%"))
+# Omdan til dataframe for lettere håndtering
+method_counts_df <- as.data.frame(method_counts)
+
+# Sortér efter antallet i faldende rækkefølge
+sorted_method <- method_counts_df[order(-method_counts_df$Freq), ]
+
+# Vælg de 10 mest forekommende Dates
+top_method <- head(sorted_method, 3)
+
+ggplot(top_method, aes(x = reorder(Var1, Freq), y = Freq)) +
+  geom_bar(stat = "identity", fill = "steelblue") + 
+  geom_text(aes(label = Freq), 
+            hjust = 0.5,              # Centreret horisontalt
+            vjust = -0.5,             # Placeret lige over søjlen
+            size = 3.5,
+            color = "black") +  
+  labs(#title = "Tre request metoder udgør næsten alle observationer",
+       x = "Request method",
+       y = "Antal") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+###################
+# 200 der burde fejle
+
+burde_fejle_counts <- table(filtered_date_status$Status_Code == 200 & str_detect(filtered_date_status$Request_Resource, "admin|wp-login|config"))
+
+# Gem resultatet i en data frame
+burde_fejle_df <- as.data.frame(burde_fejle_counts)
+# Omdan TRUE/FALSE til "Adgang" og "Ikke adgang"
+burde_fejle_df$Var1 <- ifelse(burde_fejle_df$Var1 == TRUE, "Adgang", "Ikke adgang")
 
 
-
-
+ggplot(burde_fejle_df, aes(x = Var1, y = Freq)) +
+  geom_bar(stat = "identity", fill = "steelblue") + 
+  geom_text(aes(label = Freq), 
+            hjust = 0.5,
+            vjust = -0.5,
+            size = 3.5,
+            color = "black") +  
+  labs(#title = "",
+    x = "",
+    y = "Antal") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(hjust = 1))
